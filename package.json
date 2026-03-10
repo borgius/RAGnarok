@@ -2,7 +2,7 @@
   "name": "ragnarok",
   "displayName": "RAGnarōk - Local RAG for Copilot",
   "description": "Retrieval-Augmented Generation extension for VSCode with local sentence transformers and semantic chunking",
-  "version": "0.2.10",
+  "version": "0.3.0",
   "publisher": "hyorman",
   "icon": "assets/icon.png",
   "license": "MIT",
@@ -24,10 +24,35 @@
     "onStartupFinished"
   ],
   "main": "./out/src/extension.js",
+  "enabledApiProposals": [
+    "embeddings"
+  ],
   "contributes": {
     "configuration": {
       "title": "RAGnarōk",
       "properties": {
+        "ragnarok.embeddingBackend": {
+          "type": "string",
+          "default": "auto",
+          "markdownDescription": "**Embedding backend** to use for generating vectors:\n\n- **auto** (default): Try VS Code LM embeddings first; fall back to local HuggingFace if unavailable.\n- **vscodeLM**: Force VS Code Language Model API embeddings (requires a registered embedding provider such as GitHub Copilot).\n- **huggingface**: Force local HuggingFace Transformers.js embeddings (ONNX/WASM, fully offline).\n\n⚠️ Switching backends may change the embedding dimension. Existing vector stores built with a different backend/model will need to be re-indexed.",
+          "enum": [
+            "auto",
+            "vscodeLM",
+            "huggingface"
+          ],
+          "enumDescriptions": [
+            "Auto: Try VS Code LM first, fall back to HuggingFace",
+            "VS Code LM: Force VS Code Language Model API embeddings (requires provider)",
+            "HuggingFace: Force local Transformers.js embeddings (offline)"
+          ],
+          "order": 1
+        },
+        "ragnarok.embeddingVscodeModelId": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "**VS Code LM embedding model ID** to use when backend is `vscodeLM` or `auto`.\n\nLeave empty to auto-select the first available model. The available models depend on the registered embeddings provider (e.g., GitHub Copilot).\n\n💡 Check `Developer: Show Running Extensions` → Language Model API for available model IDs.",
+          "order": 1
+        },
         "ragnarok.localModelPath": {
           "type": "string",
           "default": "",
@@ -44,7 +69,7 @@
         },
         "ragnarok.chunkSize": {
           "type": "number",
-          "default": 512,
+          "default": 1000,
           "description": "Maximum size of text chunks for embedding (in characters)",
           "minimum": 100,
           "maximum": 2000,
@@ -52,7 +77,7 @@
         },
         "ragnarok.chunkOverlap": {
           "type": "number",
-          "default": 50,
+          "default": 200,
           "description": "Overlap between chunks (in characters)",
           "minimum": 0,
           "maximum": 500,
@@ -79,7 +104,7 @@
         "ragnarok.retrievalStrategy": {
           "type": "string",
           "default": "hybrid",
-          "markdownDescription": "**Retrieval strategy** for RAG queries (applies to both simple and agentic modes):\n\n- **hybrid** (recommended): 70% semantic + 30% keyword\n- **vector**: Pure semantic similarity\n- **ensemble**: Advanced RRF fusion of vector + BM25 (slower, more accurate)\n- **bm25**: Pure keyword search with BM25 (no embeddings, fast exact matching)\n\n💡 _Can be overridden per query via LM tool parameter_",
+          "markdownDescription": "**Retrieval strategy** for RAG queries:\n\n- **hybrid** (recommended): 70% semantic + 30% keyword\n- **vector**: Pure semantic similarity\n- **ensemble**: Advanced RRF fusion of vector + BM25 (slower, more accurate)\n- **bm25**: Pure keyword search with BM25 (no embeddings, fast exact matching)\n\n💡 _Can be overridden per query via LM tool parameter_",
           "enum": [
             "vector",
             "hybrid",
@@ -92,69 +117,41 @@
             "Ensemble: Uses Reciprocal Rank Fusion with BM25 (most accurate, higher memory)",
             "BM25: Pure keyword search (Okapi BM25 algorithm, no embeddings needed)"
           ],
-          "order": 9
+          "order": 7
         },
-        "ragnarok.useAgenticMode": {
-          "type": "boolean",
-          "default": true,
-          "markdownDescription": "**Enable Agentic RAG:** Multi-step retrieval with query planning, iterative refinement, and result evaluation. When disabled, uses simple single-shot retrieval.\n\n📚 [Learn more about Agentic RAG](https://github.com/hyorman/ragnarok#agentic-rag)",
-          "order": 10
-        },
-        "ragnarok.agenticMaxIterations": {
+        "ragnarok.maxIterations": {
           "type": "number",
           "default": 3,
-          "markdownDescription": "Maximum retrieval iterations in agentic mode. Higher = more thorough but slower.\n\n⚠️ _Only applies when Agentic Mode is enabled_",
+          "markdownDescription": "Maximum retrieval iterations. Higher = more thorough but slower.",
           "minimum": 1,
           "maximum": 10,
-          "order": 11
+          "order": 8
         },
-        "ragnarok.agenticConfidenceThreshold": {
+        "ragnarok.confidenceThreshold": {
           "type": "number",
           "default": 0.7,
-          "markdownDescription": "Confidence threshold (0-1) to stop retrieval. Lower = more iterations, higher = stops earlier.\n\n⚠️ _Only applies when Agentic Mode is enabled_",
+          "markdownDescription": "Confidence threshold (0-1) to stop retrieval. Lower = more iterations, higher = stops earlier.",
           "minimum": 0,
           "maximum": 1,
-          "order": 12
+          "order": 9
         },
-        "ragnarok.agenticIterativeRefinement": {
-          "type": "boolean",
-          "default": true,
-          "markdownDescription": "Generate follow-up queries to fill information gaps detected during retrieval.\n\n⚠️ _Only applies when Agentic Mode is enabled_",
-          "order": 13
-        },
-        "ragnarok.agenticUseLLM": {
-          "type": "boolean",
-          "default": false,
-          "markdownDescription": "**Use LLM (Copilot) for intelligent planning:** Uses Copilot for query decomposition and result evaluation instead of rule-based heuristics.\n\n**Requirements:**\n- ✅ GitHub Copilot subscription\n- ✅ GitHub Copilot extension\n\n**Trade-offs:**\n- ✅ Much more intelligent\n- ✅ Context-aware planning\n- ⚠️ 2-3x slower\n- ⚠️ Uses Copilot API quota\n\n⚠️ _Only applies when Agentic Mode is enabled_",
-          "order": 14
-        },
-        "ragnarok.agenticLLMModel": {
+        "ragnarok.llmModel": {
           "type": "string",
-          "default": "gpt-4o",
-          "markdownDescription": "**LLM model to use** for query planning and evaluation:\n\n- **gpt-4o** (default): Most intelligent, best reasoning\n- **gpt-4o-mini**: Faster, cheaper, still very capable\n- **gpt-3.5-turbo**: Fastest, most economical\n\n**Performance:**\n- gpt-4o: Best quality, slower, more tokens\n- gpt-4o-mini: Good balance\n- gpt-3.5-turbo: Fast, lower quality\n\n⚠️ _Only applies when LLM Mode is enabled_",
-          "enum": [
-            "gpt-4o",
-            "gpt-4o-mini",
-            "gpt-3.5-turbo"
-          ],
-          "enumDescriptions": [
-            "GPT-4o: Most intelligent, best for complex reasoning (slower, more expensive)",
-            "GPT-4o-mini: Balanced performance and cost (recommended for most uses)",
-            "GPT-3.5 Turbo: Fastest and most economical (lower quality reasoning)"
-          ],
-          "order": 15
+          "default": "gpt-4o-mini",
+          "markdownDescription": "**LLM model family** to use for query planning and evaluation.\n\nUse **RAG: Select LLM Model** from the Command Palette to discover all available models at runtime.\n\n💡 The available models depend on your Copilot subscription and installed extensions.",
+          "order": 10
         },
-        "ragnarok.agenticIncludeWorkspaceContext": {
+        "ragnarok.includeWorkspaceContext": {
           "type": "boolean",
           "default": true,
-          "markdownDescription": "**Include workspace context:** Pass selected code, active file, imports, and symbols to Copilot (like #codebase).\n\n**Includes:**\n- Selected code (max 1000 chars)\n- File imports and symbols\n- Workspace name\n\n**Privacy:** Only relative paths, no sensitive data\n\n⚠️ _Only applies when LLM Mode is enabled_",
-          "order": 16
+          "markdownDescription": "**Include workspace context:** Pass selected code, active file, imports, and symbols to Copilot (like #codebase).\n\n**Includes:**\n- Selected code (max 1000 chars)\n- File imports and symbols\n- Workspace name\n\n**Privacy:** Only relative paths, no sensitive data",
+          "order": 11
         },
         "ragnarok.commonDatabasePath": {
           "type": "string",
           "default": "",
           "markdownDescription": "**Path to a shared/common RAG database folder.** Topics from this path are read-only and cannot be deleted or modified. Useful for team-shared knowledge bases.\n\n**Format:** Absolute path to a folder containing exported RAG database files.",
-          "order": 17
+          "order": 12
         }
       }
     },
@@ -182,6 +179,12 @@
         "title": "Add Git Repository to Topic",
         "category": "RAG",
         "icon": "$(github)"
+      },
+      {
+        "command": "ragnarok.addWebUrl",
+        "title": "Add Web URL to Topic",
+        "category": "RAG",
+        "icon": "$(globe)"
       },
       {
         "command": "ragnarok.refreshTopics",
@@ -250,13 +253,24 @@
           "id": "ragTopics",
           "name": "Topics",
           "icon": "$(files)"
+        },
+        {
+          "id": "ragConfig",
+          "name": "Configuration",
+          "icon": "$(settings-gear)"
         }
       ]
     },
     "viewsWelcome": [
       {
         "view": "ragTopics",
-        "contents": "No topics yet. Create your first topic to start using RAG!\n[Create Topic](command:ragnarok.createTopic)\nTopics help organize your documents for semantic search and retrieval-augmented generation with Copilot."
+        "contents": "RAGnarōk is starting up...\n\nReady in just a moment.",
+        "when": "!ragnarok.loaded"
+      },
+      {
+        "view": "ragTopics",
+        "contents": "No topics yet.\n\nCreate a topic to start indexing your documents for semantic search and RAG queries with Copilot.\n\n[$(add) Create Topic](command:ragnarok.createTopic)\n[$(cloud-download) Import Topic](command:ragnarok.importTopic)\n\nNeed help? [Read the docs](https://github.com/hyorman/ragnarok#readme)",
+        "when": "ragnarok.loaded && !ragnarok.hasTopics"
       }
     ],
     "menus": {
@@ -289,19 +303,24 @@
           "group": "inline@2"
         },
         {
-          "command": "ragnarok.exportTopic",
+          "command": "ragnarok.addWebUrl",
           "when": "view == ragTopics && viewItem == topic",
           "group": "inline@3"
         },
         {
-          "command": "ragnarok.deleteTopic",
+          "command": "ragnarok.exportTopic",
           "when": "view == ragTopics && viewItem == topic",
           "group": "inline@4"
         },
         {
-          "command": "ragnarok.renameTopic",
+          "command": "ragnarok.deleteTopic",
           "when": "view == ragTopics && viewItem == topic",
           "group": "inline@5"
+        },
+        {
+          "command": "ragnarok.renameTopic",
+          "when": "view == ragTopics && viewItem == topic",
+          "group": "inline@6"
         }
       ]
     },
@@ -344,10 +363,6 @@
                 "ensemble",
                 "bm25"
               ]
-            },
-            "useAgenticMode": {
-              "type": "boolean",
-              "description": "Enable agentic RAG with multi-step query planning and iterative retrieval (optional, defaults to extension settings). Note: All agentic configuration (iterations, confidence, etc.) is controlled via VS Code settings and cannot be overridden per query."
             }
           },
           "required": [
@@ -387,14 +402,15 @@
     "clean:test": "rimraf out/test"
   },
   "devDependencies": {
-    "@types/glob": "^7.2.0",
     "@eslint/js": "^9.39.1",
     "@types/adm-zip": "^0.5.7",
     "@types/archiver": "^7.0.0",
     "@types/chai": "^5.2.3",
     "@types/cheerio": "^0.22.35",
+    "@types/glob": "^7.2.0",
     "@types/mocha": "^10.0.10",
     "@types/node": "^22.10.5",
+    "@types/sinon": "^21.0.0",
     "@types/vscode": "^1.105.0",
     "@typescript-eslint/eslint-plugin": "^8.46.3",
     "@typescript-eslint/parser": "^8.46.3",
@@ -405,6 +421,7 @@
     "eslint": "^9.39.1",
     "mocha": "^11.0.1",
     "rimraf": "^6.0.1",
+    "sinon": "^21.0.2",
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.47.0"
   },
@@ -415,12 +432,12 @@
     "@langchain/core": "^1.0.0",
     "@langchain/textsplitters": "^1.0.0",
     "adm-zip": "^0.5.16",
+    "apache-arrow": "^18.1.0",
     "archiver": "^7.0.1",
     "async-mutex": "^0.5.0",
     "cheerio": "^1.1.2",
-    "ignore": "^7.0.5",
     "glob": "^10.4.5",
-    "apache-arrow": "^18.1.0",
+    "ignore": "^7.0.5",
     "pdf-parse": "^1.1.1"
   },
   "optionalDependencies": {

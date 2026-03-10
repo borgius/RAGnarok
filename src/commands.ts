@@ -7,9 +7,9 @@ import * as vscode from "vscode";
 import * as fs from "fs/promises";
 import { TopicManager } from "./managers/topicManager";
 import { EmbeddingService } from "./embeddings/embeddingService";
-import { TopicTreeDataProvider } from "./topicTreeView";
+import { TopicTreeDataProvider, ConfigTreeDataProvider } from "./topicTreeView";
 import { COMMANDS } from "./utils/constants";
-import { Logger } from "./utils/logger";
+import { Logger, sanitizeErrorMessage } from "./utils/logger";
 import { GitHubTokenManager } from "./utils/githubTokenManager";
 import { Topic } from "./utils/types";
 
@@ -19,18 +19,21 @@ export class CommandHandler {
   private topicManager: TopicManager;
   private embeddingService: EmbeddingService;
   private treeDataProvider: TopicTreeDataProvider;
+  private configDataProvider: ConfigTreeDataProvider;
   private context: vscode.ExtensionContext;
   private tokenManager: GitHubTokenManager;
 
   private constructor(
     context: vscode.ExtensionContext,
     topicManager: TopicManager,
-    treeDataProvider: TopicTreeDataProvider
+    treeDataProvider: TopicTreeDataProvider,
+    configDataProvider: ConfigTreeDataProvider
   ) {
     this.context = context;
     this.topicManager = topicManager;
     this.embeddingService = EmbeddingService.getInstance();
     this.treeDataProvider = treeDataProvider;
+    this.configDataProvider = configDataProvider;
     this.tokenManager = GitHubTokenManager.getInstance();
   }
 
@@ -39,10 +42,11 @@ export class CommandHandler {
    */
   public static async registerCommands(
     context: vscode.ExtensionContext,
-    treeDataProvider: TopicTreeDataProvider
+    treeDataProvider: TopicTreeDataProvider,
+    configDataProvider: ConfigTreeDataProvider
   ): Promise<void> {
     const topicManager = await TopicManager.getInstance();
-    const handler = new CommandHandler(context, topicManager, treeDataProvider);
+    const handler = new CommandHandler(context, topicManager, treeDataProvider, configDataProvider);
 
     context.subscriptions.push(
       vscode.commands.registerCommand(COMMANDS.CREATE_TOPIC, () =>
@@ -57,6 +61,9 @@ export class CommandHandler {
       vscode.commands.registerCommand(COMMANDS.ADD_GITHUB_REPO, (item?: any) =>
         handler.addGithubRepo(item)
       ),
+      vscode.commands.registerCommand(COMMANDS.ADD_WEB_URL, (item?: any) =>
+        handler.addWebUrl(item)
+      ),
       vscode.commands.registerCommand(COMMANDS.REFRESH_TOPICS, () =>
         handler.refreshTopics()
       ),
@@ -68,6 +75,19 @@ export class CommandHandler {
       ),
       vscode.commands.registerCommand(COMMANDS.CLEAR_DATABASE, () =>
         handler.clearDatabase()
+      ),
+      // Config tree view commands (delegated to ConfigTreeDataProvider)
+      vscode.commands.registerCommand(COMMANDS.SELECT_VSCODE_EMBEDDING_MODEL, () =>
+        configDataProvider.selectVscodeEmbeddingModel()
+      ),
+      vscode.commands.registerCommand(COMMANDS.SELECT_HF_EMBEDDING_MODEL, () =>
+        configDataProvider.selectHfEmbeddingModel()
+      ),
+      vscode.commands.registerCommand(COMMANDS.SELECT_LLM_MODEL, () =>
+        configDataProvider.selectLLMModel()
+      ),
+      vscode.commands.registerCommand(COMMANDS.EDIT_CONFIG_ITEM, (configKey: string) =>
+        configDataProvider.editConfigItem(configKey)
       ),
       // GitHub token management commands
       vscode.commands.registerCommand(COMMANDS.ADD_GITHUB_TOKEN, () =>
@@ -107,7 +127,7 @@ export class CommandHandler {
       this.treeDataProvider.refresh();
     } catch (err) {
       logger.error('Failed to set embedding model', err);
-      vscode.window.showErrorMessage(`Failed to set embedding model: ${err}`);
+      vscode.window.showErrorMessage(`Failed to set embedding model: ${sanitizeErrorMessage(err)}`);
     }
   }
 
@@ -186,7 +206,7 @@ export class CommandHandler {
       this.treeDataProvider.refresh();
     } catch (error) {
       logger.error(`Failed to rename topic: ${error}`);
-      vscode.window.showErrorMessage(`Failed to rename topic: ${error}`);
+      vscode.window.showErrorMessage(`Failed to rename topic: ${sanitizeErrorMessage(error)}`);
     }
   }
 
@@ -228,7 +248,7 @@ export class CommandHandler {
       logger.info(`Topic created: ${topic.id}`);
     } catch (error) {
       logger.error(`Failed to create topic: ${error}`);
-      vscode.window.showErrorMessage(`Failed to create topic: ${error}`);
+      vscode.window.showErrorMessage(`Failed to create topic: ${sanitizeErrorMessage(error)}`);
     }
   }
 
@@ -299,7 +319,7 @@ export class CommandHandler {
       }
     } catch (error) {
       logger.error(`Failed to delete topic: ${error}`);
-      vscode.window.showErrorMessage(`Failed to delete topic: ${error}`);
+      vscode.window.showErrorMessage(`Failed to delete topic: ${sanitizeErrorMessage(error)}`);
     }
   }
 
@@ -355,7 +375,7 @@ export class CommandHandler {
         );
         return;
       }
-      
+
       // Ask whether the user wants to select files or folders.
       // Some platforms/OS dialogs don't handle mixed file+folder mode well,
       // so present a choice and open the dialog in the selected mode.
@@ -411,7 +431,7 @@ export class CommandHandler {
       }
 
       const filePaths = fileUris.map((uri) => uri.fsPath);
-      
+
       // Check if any selected paths are directories
       let hasDirectories = false;
       for (const filePath of filePaths) {
@@ -499,7 +519,7 @@ export class CommandHandler {
       this.treeDataProvider.refresh();
     } catch (error) {
       logger.error(`Failed to add document: ${error}`);
-      vscode.window.showErrorMessage(`Failed to add document: ${error}`);
+      vscode.window.showErrorMessage(`Failed to add document: ${sanitizeErrorMessage(error)}`);
     }
   }
 
@@ -651,7 +671,7 @@ export class CommandHandler {
                 },
                 {
                   label: "Continue Without Token",
-                  description: "Public repositories only",
+                  description: "Public repos only — 60 requests/hr limit (may fail for large repos)",
                   value: false,
                 },
               ],
@@ -767,13 +787,152 @@ export class CommandHandler {
       this.treeDataProvider.refresh();
     } catch (error) {
       logger.error(`Failed to add GitHub repository: ${error}`);
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      const errorStack = error instanceof Error ? error.stack : undefined;
+      vscode.window.showErrorMessage(`Failed to add GitHub repository: ${sanitizeErrorMessage(error)}`);
+    }
+  }
 
-      vscode.window.showErrorMessage(
-        `Failed to add GitHub repository:\n\n${errorMessage}${errorStack ? '\n\nStack:\n' + errorStack : ''}`,
-        "OK"
+  /**
+   * Add a web URL to a topic.
+   * If the URL points to a GitHub repository, routes to addGithubRepo instead.
+   */
+  private async addWebUrl(item?: any): Promise<void> {
+    try {
+      let selectedTopic: any;
+
+      // If called from tree view with item
+      if (item && item.topic) {
+        selectedTopic = item.topic;
+      } else {
+        // Called from command palette - show picker
+        const topics = await this.topicManager.getAllTopics();
+
+        if (topics.length === 0) {
+          const create = await vscode.window.showInformationMessage(
+            "No topics available. Would you like to create one?",
+            "Create Topic"
+          );
+
+          if (create === "Create Topic") {
+            await this.createTopic();
+            return this.addWebUrl(); // Retry after creating topic
+          }
+          return;
+        }
+
+        const selected = await vscode.window.showQuickPick(
+          topics.map((t: any) => ({
+            label: t.name,
+            description: `${t.documentCount} document(s)`,
+            topic: t,
+          })),
+          {
+            placeHolder: "Select a topic",
+          }
+        );
+
+        if (!selected) {
+          return;
+        }
+
+        selectedTopic = selected.topic;
+      }
+
+      // Check if topic is from common database (read-only)
+      if (this.topicManager.isCommonTopic(selectedTopic.id)) {
+        vscode.window.showWarningMessage(
+          `Cannot add to "${selectedTopic.name}" - topics from common database are read-only.`
+        );
+        return;
+      }
+
+      const url = await vscode.window.showInputBox({
+        prompt: "Enter web page URL to ingest",
+        placeHolder: "https://example.com/docs/page",
+        ignoreFocusOut: true,
+        validateInput: (value) => {
+          if (!value || value.trim().length === 0) {
+            return "URL cannot be empty";
+          }
+          try {
+            const parsed = new URL(value.trim());
+            if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+              return "URL must start with http:// or https://";
+            }
+          } catch {
+            return "Invalid URL format";
+          }
+          return null;
+        },
+      });
+
+      if (!url) {
+        return;
+      }
+
+      const trimmedUrl = url.trim();
+
+      // Detect GitHub repository URLs and route to the GitHub ingestion flow
+      const parsed = new URL(trimmedUrl);
+      const host = parsed.hostname.toLowerCase();
+      const isGitHubHost = host === "github.com" || host.endsWith(".github.com");
+      const hasRepoPath = /^\/[\w-]+\/[\w.-]+/.test(parsed.pathname);
+      const hasToken = await this.tokenManager.getToken(host);
+
+      if ((isGitHubHost || hasToken) && hasRepoPath) {
+        const useGithub = await vscode.window.showInformationMessage(
+          "This looks like a GitHub repository. Use GitHub repository ingestion for better results?",
+          "Yes, use GitHub ingestion",
+          "No, load as web page"
+        );
+        if (useGithub === "Yes, use GitHub ingestion") {
+          return this.addGithubRepo(item);
+        }
+      }
+
+      logger.info(`Adding web URL to topic: ${selectedTopic.name}`, { url: trimmedUrl });
+
+      // Process web URL using TopicManager
+      await vscode.window.withProgress(
+        {
+          location: vscode.ProgressLocation.Notification,
+          title: `Loading web page...`,
+          cancellable: false,
+        },
+        async (progress) => {
+          const results = await this.topicManager.addDocuments(
+            selectedTopic.id,
+            [trimmedUrl],
+            {
+              onProgress: (pipelineProgress) => {
+                progress.report({
+                  message: pipelineProgress.message,
+                  increment: pipelineProgress.progress / 100,
+                });
+              },
+              loaderOptions: {
+                fileType: "web",
+              },
+            }
+          );
+
+          progress.report({ message: "Complete!" });
+
+          const totalChunks = results.reduce(
+            (sum, r) => sum + r.pipelineResult.metadata.chunksStored,
+            0
+          );
+          logger.info(`Web page added: ${totalChunks} chunks`);
+        }
       );
+
+      const stats = await this.topicManager.getTopicStats(selectedTopic.id);
+      vscode.window.showInformationMessage(
+        `Web page added to "${selectedTopic.name}" successfully! Total: ${stats?.documentCount} documents, ${stats?.chunkCount} chunks.`
+      );
+      this.treeDataProvider.refresh();
+    } catch (error) {
+      logger.error(`Failed to add web URL: ${error}`);
+      vscode.window.showErrorMessage(`Failed to add web URL: ${sanitizeErrorMessage(error)}`);
     }
   }
 
@@ -792,7 +951,7 @@ export class CommandHandler {
     try {
       await this.embeddingService.clearCache();
     } catch (error) {
-      vscode.window.showErrorMessage(`Failed to clear cache: ${error}`);
+      vscode.window.showErrorMessage(`Failed to clear cache: ${sanitizeErrorMessage(error)}`);
     }
   }
 
@@ -825,7 +984,7 @@ export class CommandHandler {
       }
     } catch (error) {
       logger.error(`Failed to clear database: ${error}`);
-      vscode.window.showErrorMessage(`Failed to clear database: ${error}`);
+      vscode.window.showErrorMessage(`Failed to clear database: ${sanitizeErrorMessage(error)}`);
     }
   }
 
@@ -885,8 +1044,24 @@ export class CommandHandler {
         return;
       }
 
+      // Validate GitHub token format
+      const trimmedToken = token.trim();
+      const validTokenPatterns = [
+        /^ghp_[a-zA-Z0-9]{36,255}$/,  // Personal Access Token
+        /^gho_[a-zA-Z0-9]{36,255}$/,  // OAuth token
+        /^ghu_[a-zA-Z0-9]{36,255}$/,  // User-to-server token
+        /^ghs_[a-zA-Z0-9]{36,255}$/,  // Server-to-server token
+        /^ghr_[a-zA-Z0-9]{36,255}$/,  // Refresh token
+        /^github_pat_[a-zA-Z0-9_]{22,}$/,  // Fine-grained PAT v2
+        /^[a-f0-9]{40}$/,             // Legacy classic token
+      ];
+      const isValidFormat = validTokenPatterns.some(p => p.test(trimmedToken));
+      if (!isValidFormat) {
+        vscode.window.showWarningMessage('Token format does not match known GitHub token patterns. It will be stored but may not work.');
+      }
+
       // Save token
-      await this.tokenManager.setToken(host.trim(), token.trim());
+      await this.tokenManager.setToken(host.trim(), trimmedToken);
       await this.tokenManager.addHostToList(this.context, host.trim());
 
       vscode.window.showInformationMessage(
@@ -895,7 +1070,7 @@ export class CommandHandler {
       logger.info(`GitHub token added for host: ${host.trim()}`);
     } catch (error) {
       logger.error(`Failed to add GitHub token: ${error}`);
-      vscode.window.showErrorMessage(`Failed to add GitHub token: ${error}`);
+      vscode.window.showErrorMessage(`Failed to add GitHub token: ${sanitizeErrorMessage(error)}`);
     }
   }
 
@@ -923,7 +1098,7 @@ export class CommandHandler {
       });
     } catch (error) {
       logger.error(`Failed to list GitHub tokens: ${error}`);
-      vscode.window.showErrorMessage(`Failed to list GitHub tokens: ${error}`);
+      vscode.window.showErrorMessage(`Failed to list GitHub tokens: ${sanitizeErrorMessage(error)}`);
     }
   }
 
@@ -973,7 +1148,7 @@ export class CommandHandler {
       }
     } catch (error) {
       logger.error(`Failed to remove GitHub token: ${error}`);
-      vscode.window.showErrorMessage(`Failed to remove GitHub token: ${error}`);
+      vscode.window.showErrorMessage(`Failed to remove GitHub token: ${sanitizeErrorMessage(error)}`);
     }
   }
 
@@ -989,7 +1164,7 @@ export class CommandHandler {
         topicToExport = item.topic;
       } else {
         // Called from command palette - show picker
-        const topics = this.topicManager.getAllTopics().filter(
+        const topics = (await this.topicManager.getAllTopics()).filter(
           (t) => t.source !== 'common'  // Only show local topics for export
         );
 
@@ -1059,7 +1234,7 @@ export class CommandHandler {
       logger.info(`Topic exported: ${topicToExport.id}`);
     } catch (error) {
       logger.error(`Failed to export topic: ${error}`);
-      vscode.window.showErrorMessage(`Failed to export topic: ${error}`);
+      vscode.window.showErrorMessage(`Failed to export topic: ${sanitizeErrorMessage(error)}`);
     }
   }
 
@@ -1107,7 +1282,7 @@ export class CommandHandler {
       }
     } catch (error) {
       logger.error(`Failed to import topic: ${error}`);
-      vscode.window.showErrorMessage(`Failed to import topic: ${error}`);
+      vscode.window.showErrorMessage(`Failed to import topic: ${sanitizeErrorMessage(error)}`);
     }
   }
 }
